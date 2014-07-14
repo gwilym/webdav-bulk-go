@@ -31,14 +31,20 @@ type task struct {
 }
 
 func usage() {
+	cmd := os.Args[0]
 	fmt.Fprintln(os.Stderr, "WebDAV bulk upload and download tool")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Usage for uploads:   ", os.Args[0], "[OPTION]... DIRECTORY URL")
-	fmt.Fprintln(os.Stderr, "Usage for downloads: ", os.Args[0], "[OPTION]... URL DIRECTORY")
+	fmt.Fprintln(os.Stderr, "Usage for uploads:   ", cmd, "[OPTION]... DIRECTORY URL")
+	fmt.Fprintln(os.Stderr, "Usage for downloads: ", cmd, "[OPTION]... URL DIRECTORY")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, cmd, "DIRECTORY URL will upload everything from DIRECTORY to URL, whereas")
+	fmt.Fprintln(os.Stderr, cmd, "URL DIRECTORY will download everything from URL to DIRECTORY.")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "OPTIONS (in alphabetal order)")
 	fmt.Fprintln(os.Stderr, "        -d              Use Digest authentication")
-	fmt.Fprintln(os.Stderr, "        -n NUMBER       Copy NUMBER files at the same time (default: 5)")
+	fmt.Fprintln(os.Stderr, "        -n NUMBER       Copy NUMBER files concurrently (default: 5, larger numbers may copy")
+	fmt.Fprintln(os.Stderr, "                        many smaller files faster, lower numbers should be used to copy")
+	fmt.Fprintln(os.Stderr, "                        large files)")
 	fmt.Fprintln(os.Stderr, "        -p PASSWORD     Password to use for WebDAV")
 	fmt.Fprintln(os.Stderr, "        -u USERNAME     Username to use for WebDAV")
 	fmt.Fprintln(os.Stderr)
@@ -93,11 +99,17 @@ func processTask(directory_path string, task *task) {
 		// PUT
 
 		pr, pw := io.Pipe()
+		defer pr.Close()
+
 		bufin := bufio.NewReader(file)
 
 		go func() {
-			bufin.WriteTo(pw)
-			pw.Close()
+			_, err := bufin.WriteTo(pw)
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
 		}()
 
 		req, err := http.NewRequest("PUT", url, pr)
@@ -110,11 +122,11 @@ func processTask(directory_path string, task *task) {
 			ApplyDigestAuth(req, digest_auth, nc)
 		}
 
-		log.Println("Sending", task.path)
+		log.Printf("Sending %s (%d bytes)", task.path, stat.Size())
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal("Sending PUT request failed", err)
 		}
 		defer resp.Body.Close()
 
@@ -197,10 +209,15 @@ func main() {
 		}()
 	}
 
+	counter := 0
+
+	// create collections first
+
 	filepath.Walk(directory_path, func(path string, f os.FileInfo, err error) error {
 		if len(path) > prefix_len {
 			if f.IsDir() {
 				relative_path := path[prefix_len:]
+				counter++
 				tasks <- &task{path: relative_path, direction: task_direction}
 			}
 		}
@@ -214,6 +231,7 @@ func main() {
 		if len(path) > prefix_len {
 			if !f.IsDir() {
 				relative_path := path[prefix_len:]
+				counter++
 				tasks <- &task{path: relative_path, direction: task_direction}
 			}
 		}
@@ -221,4 +239,6 @@ func main() {
 	})
 
 	close(tasks)
+
+	fmt.Println("Done, transferred", counter, "directories / files")
 }
